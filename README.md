@@ -1,2 +1,2 @@
 # Predictive-Modeling-of-Suitable-Habitat-for-Scleractinia-Deep-Sea-Corals
-Created a global dataset of Scleractinia coral and predicted habitat suitability with a maxent machine learning model
+Academic internship at NIOZ as a part of my bachelor thesis at University College Roosevelt. The first phase of my internship was to create a global dataset of Scleractinia deep-sea coral for the purpose of further research at NIOZ. The second phase of my internship focused on habitat suitability prediction of Scleractinia deep-sea corals for the purpose of data validation and habitat exploration. The predictions were made with a machine learning (maxent) habitat suitability model.
