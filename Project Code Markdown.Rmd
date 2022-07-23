@@ -1,0 +1,1222 @@
+---
+title: "Senior Project"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+***Libraries***
+Below are the libraries that were used. 
+```{r, message = FALSE, warning = FALSE}
+options(java.parameters = "-Xmx8000m")
+library(raster)
+library(fuzzySim)
+library(readxl)
+library(leaflet)
+library(marmap)
+library(rgdal)
+library(terra)
+library(tidyverse)
+library(dismo)
+library(rJava)
+library(mlr)
+library(reshape2)
+```
+
+***NOAA Data*** 
+Uploading the NOAA dataset, and filtering the data to only contain deep sea corals and sponges. Sea Pens and other coral-like hydrozoans are removed. The surface corals are removed by filtering corals for depth more than 30m. The dataset is tagged to be NOAA data through the variable "data source". The NOAA dataset did not contain a variable for the life stage of the corals. The variable "lifeStage" with empty entries were generated. Furthermore, the variables for coordinates, depth, location accuracy, species name, sampling method/equipment and observation date were renamed as preparatory work for a single, merged dataset. Soft(including stoloniferan and alcyonacean coral) and gorgonian coral are not reef building [1][2][3]. Lace coral are also not significant reef builders [4][5]. Only Scleratinians (stony corals) are significant reef builders [5]. Below the dataset is filtered to only contain entries of sponges and stony corals. 
+
+```{r, warning=FALSE}
+NOAA_Data_Upload <- read_csv("NOAA_Deep_Sea_Corals_Data.csv", 
+              col_types = cols(DepthInMeters = col_double(), 
+                               latitude = col_double(),
+                               longitude = col_double()))
+NOAA_Data <- NOAA_Data_Upload %>% 
+  filter(DepthInMeters > 30,
+         !VernacularNameCategory %in% c("sea pen", "other coral-like hydrozoan")) %>% 
+  rename("coral_category" = VernacularNameCategory,
+         "scientific_name" = ScientificName, 
+         "depth" = DepthInMeters,
+         "location_accuracy" = LocationAccuracy, 
+         "basis_of_record" = SamplingEquipment,
+         "observation_date" = ObservationDate) %>% 
+  mutate(lifeStage = "Unknown",
+         data_source = "NOAA",
+         location_accuracy = as.numeric(str_remove(location_accuracy, "m")), 
+         observation_date = as.Date(observation_date),
+         year = as.numeric(format(observation_date, "%Y"))) %>% 
+  select(coral_category, scientific_name, latitude, longitude, depth, location_accuracy, year, basis_of_record, data_source) %>% 
+   filter(grepl("stony|sponge", coral_category))
+```
+
+  
+***ICES Coral Data***  
+Uploading the ICES Vulnerable Marine Ecosystems (VME) Data. The different entries that exist in the variable "VME_Indicator was explored, to filter out all species that are not sponges or stony corals.
+
+```{r, warning = FALSE}
+ICES_Data_Upload <- read.csv("ICES Vulnerable Marine Ecosystems Data/ICES_VME_Data.csv")
+ICES_Data_Upload %>%  
+  distinct(VME_Indicator)
+```
+
+The data was filtered to only contain stony coral and sponges, and the surface corals and sponges were filtered out by removing species under the depth of 30m. The values of the variable "DepthLower" was given as both positive and negative values. The entries of the variable were changed to only be positive values. The data was tagged to be ICES data through the variable "data source". The variables for coral category, depth, latitude, longitude, life stage, location accuracy sampling method and observation date were renamed as preparatory work for a single, merged dataset. 
+```{r}
+  ICES_Data <- ICES_Data_Upload %>% 
+    mutate(DepthLower = abs(DepthLower)) %>% 
+    filter(DepthLower > 30,
+           VME_Indicator %in% c("Stony coral", "Sponge")) %>% 
+    rename("coral_category" = VME_Indicator, 
+           "depth" = DepthLower, 
+           "latitude"= MiddleLatitude, 
+           "longitude" = MiddleLongitude,
+           "lifeStage" = Dead_Alive,
+           "location_accuracy" = RecordPositionAccuracy,
+           "observation_date" = ObsDate, 
+           "basis_of_record" = SurveyMethod) %>% 
+    mutate(scientific_name = "",
+           data_source = "ICES", 
+           observation_date = parse_datetime(observation_date, format = "%b  %d %Y %I:%M%p"),
+           year = as.numeric(format(observation_date, "%Y"))) %>%
+    select(coral_category, scientific_name, latitude, longitude, depth, lifeStage, location_accuracy, basis_of_record, year, data_source)
+```
+
+***OBIS Scleratinian Data***  
+Various Scleratinia coral datasets from OBIS were collected and uploaded to one list element. The relevant variables from the datasets were coordinates, depth (maximum and minimum), species name, life stage and uncertainty of occurrence. These variable as preparatory work for the single, merged dataset (of NOAA, OBIS and ICES Data). Entries in the variable "life stage" that were blank (given as: "") or given as NA were replaced with the entry "Unknown" (string). Only some of the OBIS datasets contained the variables "uncertainty of occurence" and "life stage". For the OBIS datasets lacking the variable "uncertainty of occurence", this variable was generated, and NA entries (numeric variable) were given. For the OBIS datasets lacking the variable "life stage", this variable was generated and the entry "Unknown" (string) was given. All the OBIS datasets in the list element would now have the variables coordinates, depth (maximum and minimum), species name, life stage, uncertainty of occurrence and coral category. 
+
+```{r, warning = FALSE}
+OBIS_files <- list.files(path = "OBIS Scleratinian Data", recursive = TRUE, pattern="*.txt")
+OBIS_data_list <- list()
+for (i in 1:length(OBIS_files)) {
+  OBIS_data_list[[i]] <- read.delim(paste0("OBIS Scleratinian Data/", OBIS_files[i])) %>% 
+    rename("scientific_name" = scientificName,
+           "latitude" = decimalLatitude,
+           "longitude" = decimalLongitude, 
+           "depth" = minimumDepthInMeters, 
+           "basis_of_record" = basisOfRecord)
+  ifelse("coordinateUncertaintyInMeters" %in% colnames(OBIS_data_list[[i]]) == TRUE, 
+         OBIS_data_list[[i]] <- rename(OBIS_data_list[[i]], "location_accuracy" = coordinateUncertaintyInMeters), 
+        OBIS_data_list[[i]] <- mutate(OBIS_data_list[[i]], location_accuracy = NA))
+  ifelse("lifeStage" %in% colnames(OBIS_data_list[[i]]) == FALSE,
+         OBIS_data_list[[i]] <- mutate(OBIS_data_list[[i]], lifeStage = "Unknown"), "")
+  OBIS_data_list[[i]]$lifeStage <- gsub("^$", "Unknown", OBIS_data_list[[i]]$lifeStage)
+  OBIS_data_list[[i]]$lifeStage <- replace_na(OBIS_data_list[[i]]$lifeStage, "Unknown")
+OBIS_data_list[[i]] <- OBIS_data_list[[i]] %>% 
+  select(scientific_name, latitude, 
+         longitude, depth, location_accuracy, lifeStage, basis_of_record, year)
+}
+```
+
+Below the OBIS datasets in the list object were merged to one dataset. In contrast with the other datasets (ICES and NOAA), the variable "coral category" was not included in the OBIS dataset. All the coral observations in the OBIS datasets were Scleratinians (aka stony corals). Therefore, the variable "coral_category" was created with "stony coral" entries for each observation. To remove surface corals, only corals under the depth of 30m were included. Also, a variable (called "data_source") informing about the source of the data was created. All entries were "OBIS". 
+
+```{r}
+OBIS_data_upload <- map(OBIS_data_list, as_tibble) %>% 
+  bind_rows() 
+OBIS_data <- OBIS_data_upload %>% 
+  filter(depth > 30) %>% 
+  mutate(coral_category = "stony coral", 
+         data_source = "OBIS")
+```
+
+
+***Single, merged dataset*** 
+The single merged dataset was created. 
+
+```{r}
+Final_coral_data <- bind_rows(ICES_Data, NOAA_Data, OBIS_data)
+```
+ 
+```{r}
+## Color palette
+#pal <- colorFactor(palette = c("red", "blue"), domain = Coral_inv$data_reliable)
+
+#Map <- leaflet(data = Coral_inv, options = leafletOptions(preferCanvas = TRUE, zoomControl = FALSE)) %>% 
+ # addTiles() %>%
+  #addCircleMarkers(lat = ~latitude, lng = ~longitude, color = ~pal(data_reliable), radius = 0.3) %>%
+  #addLegend(pal = pal, values = ~data_reliable)%>%
+  #setView(lng = 0, lat = 0, zoom = 1.45) %>%
+  #setMaxBounds(lng1 = -179, lng2 = 179, lat1 = -90, lat2 = 90)
+#Map
+```
+
+***Dataset that is used for investigation prior to SDM***
+
+```{r}
+Coral_inv_prep <- Final_coral_data %>% 
+  filter(grepl("coral", coral_category)) %>% 
+  mutate(id = row_number())
+
+data_unreliable <- Coral_inv_prep %>% 
+  filter(year < 1950| is.na(year)| is.na(basis_of_record)| is.na(location_accuracy)) %>% 
+  mutate(data_reliable = "no")
+
+data_reliable <- Coral_inv_prep %>% 
+  filter(!c(year < 1950 | is.na(year)| is.na(basis_of_record) | is.na(location_accuracy))) %>% 
+  filter(location_accuracy < 370) %>%
+  mutate(data_reliable = "yes") 
+
+Coral_inv <- bind_rows(data_unreliable, data_reliable) %>% 
+  mutate(coral_presence = 1)
+
+# Creating a dataset with reliable datapoints
+reliable_coral<- Coral_inv %>% 
+  filter(data_reliable == "yes")
+
+# Creating a dataset with unreliable datapoints
+unreliable_coral <- Coral_inv %>% 
+  filter(data_reliable == "no")
+
+# Downloading the reliable coral data
+write_csv(reliable_coral, file = "Processed Coral Data/reliable_coral.txt")
+
+# Downloading the unreliable coral data
+write.csv(unreliable_coral, file = "Processed Coral Data/unreliable_coral.txt")
+
+```
+
+***Making a gridded dataset from the reliable corals of the above section***
+```{r}
+
+# Uploading reliable coral dataset
+reliable_coral<- read_csv("Processed Coral Data/reliable_coral.txt")
+
+#Uploading the bathymetry raster dataset, which works as a base for the gridded coral set
+bathymetry <- raster("Predictor Variables/Bathymetry data/bathy - clipped.tif")
+
+reliable_coordinates <- reliable_coral %>%
+  select(longitude, latitude)
+# creating a presence-absence dataset of corals based on the bathymetry grid size and resolution
+reliable_gridded_coral_bathy <- gridRecords(rst = bathymetry, pres.coords = reliable_coordinates, abs.coords = NULL) 
+
+reliable_gridded_coral <- reliable_gridded_coral_bathy %>% 
+  select(x,y,presence)
+
+reliable_coordinates_grid_coral <- reliable_gridded_coral %>% 
+  select(x,y)
+
+reliable_presence_values_grid_coral <- gridded_coral %>% 
+  select(presence)
+
+# Creating an empty raster 
+r <- raster(ext=extent(bathymetry), resolution=res(bathymetry), crs = "+proj=longlat +datum=WGS84")
+# Creating a raster of the reliable presence_absence coral data
+reliable_gridded_coral_raster <- rasterize(x = reliable_coordinates_grid_coral, y = r, field = reliable_presence_values_grid_coral)
+# Downloading the coral raster dataset
+writeRaster(reliable_gridded_coral_raster, file = "Processed Coral Data/reliable_gridded_coral_data.tif")
+
+```
+The coral raster dataset was downloaded and resampled in QGIS to have identical data point coordinates within each grid cell as the other environmental data.
+
+***Making a gridded dataset from the unreliable corals of the above section***
+```{r}
+# Uploading reliable coral dataset
+unreliable_coral<- read_csv("Processed Coral Data/unreliable_coral.txt")
+
+#Uploading the bathymetry raster dataset, which works as a base for the gridded coral set
+bathymetry <- raster("Predictor Variables/Bathymetry data/bathy - clipped.tif")
+
+unreliable_coordinates <- unreliable_coral %>%
+  select(longitude, latitude)
+# creating a presence-absence dataset of corals based on the bathymetry grid size and resolution
+unreliable_gridded_coral_bathy <- gridRecords(rst = bathymetry, pres.coords = unreliable_coordinates, abs.coords = NULL) 
+
+unreliable_gridded_coral <- unreliable_gridded_coral_bathy %>% 
+  select(x,y,presence)
+
+unreliable_coordinates_grid_coral <- unreliable_gridded_coral %>% 
+  select(x,y)
+
+unreliable_presence_values_grid_coral <- unreliable_gridded_coral %>% 
+  select(presence)
+
+# Creating an empty raster 
+r <- raster(ext=extent(bathymetry), resolution=res(bathymetry), crs = "+proj=longlat +datum=WGS84")
+# Creating a raster of the reliable presence_absence coral data
+unreliable_gridded_coral_raster <- rasterize(x = unreliable_coordinates_grid_coral, y = r, field = unreliable_presence_values_grid_coral)
+# Downloading the coral raster dataset
+writeRaster(unreliable_gridded_coral_raster, file = "Processed Coral Data/unreliable_gridded_coral_data.tif")
+```
+
+***Creating the final coral dataset***
+The dataset was uploaded to QGIS, and resampled to the spatial datapoints used for the other environmental variables. The resampled coral data was downloaded as as a csv file. Below the data is uploaded to R again, and the final coral dataset is made.
+```{r}
+# Uploading the resampled coral data
+# Unreliable coral grid
+upload_unreliable_coral <- read_csv("Predictor Variables/Coral data/unreliable_coral_gridded.csv") %>% 
+  select(x, y, SAMPLE_unreliable_coral_presence1) %>% 
+  rename("coral_presence" = SAMPLE_unreliable_coral_presence1)
+
+unreliable_background <- upload_unreliable_coral %>% 
+  filter(coral_presence == 0) %>% 
+  mutate(coral_reliability = NA) 
+
+unreliable_presence <- upload_unreliable_coral %>% 
+  filter(coral_presence == 1) %>% 
+  mutate(coral_reliability = "unreliable") 
+
+unreliable_coral <- bind_rows(unreliable_background, unreliable_presence)
+
+rm(upload_unreliable_coral, unreliable_background, unreliable_presence)
+
+
+# Reliable coral grid
+upload_reliable_coral <- read_csv("Predictor Variables/Coral data/reliable_coral_gridded.csv") %>% 
+  select(x, y, SAMPLE_reliable_coral1) %>% 
+  rename("coral_presence" = SAMPLE_reliable_coral1)
+
+reliable_background <- upload_reliable_coral %>% 
+  filter(coral_presence == 0) %>% 
+  mutate(coral_reliability = NA) 
+
+reliable_presence <- upload_reliable_coral %>% 
+  filter(coral_presence == 1) %>% 
+  mutate(coral_reliability= "reliable") 
+
+reliable_coral <- rbind(reliable_background, reliable_presence)
+
+rm(upload_reliable_coral, reliable_background, reliable_presence)
+
+# Merged coral dataset. The dataset contains duplicates of coral that have the same coordinates, but are labelled as reliable and unreliable
+coral_merged_duplicates <- full_join(reliable_coral, unreliable_coral)
+rm(reliable_coral, unreliable_coral)
+
+# Removing duplicates 
+coral_background <- coral_merged_duplicates %>% 
+  filter(coral_presence == 0)
+
+coral_non_duplicate <- coral_merged_duplicates %>% 
+  filter(coral_presence == 1) %>% 
+  group_by(x,y) %>%
+  filter(n() == 1)
+
+coral_duplicate <- coral_merged_duplicates %>% 
+  filter(coral_presence == 1) %>% 
+  group_by(x,y) %>% 
+  filter(n() == 2) %>% 
+  ungroup() %>% 
+  filter(coral_reliability == "reliable") 
+
+# Final coral dataset
+final_coral_gridded <- rbind(coral_background, coral_non_duplicate, coral_duplicate)
+
+# removing the datasets used to remove duplicates
+rm(coral_background, coral_non_duplicate, coral_duplicate)
+
+# Downloading the final coral gridded dataset
+write.csv(final_coral_gridded, "Predictor Variables/Coral data/final_coral_gridded.csv")
+```
+
+***Processing Environmental Variables*** 
+Below, the environmental variables appararent oxygen utilization, dissolved oxygen, nitrate, phosphate, salinity, silicate and temperature were processed. The seafloor values within the 3d matrices were extracted. Removing all columns only containing NAs.
+
+Making a function that only extracts values at the seafloor. The values at the sea floor are the numeric entries prior to NA entries for each row. 
+```{r}
+lastValue <- function(x) {tail(x[!is.na(x)],1)}
+```
+Creating the temperature seafloor dataset
+```{r}
+temp_data_upload <- read_csv("Predictor Variables/Temperature/sampled_temp.csv")
+
+# changing the id column and removing the column fid (unimportant variable)
+temp_data <- temp_data_upload %>%
+  mutate(id = row_number()) %>% 
+  select(-c(fid)) 
+
+# Removing rows with only NAs in the temperature entries
+temp_data <- temp_data[rowSums(is.na(temp_data)) != (ncol(temp_data)-3),]
+
+temp_data_analysis <- temp_data %>% 
+  select(-c(x,y,id))
+# Extracting the coordinates for each observation
+coordinates_temp <- temp_data %>%
+  select(id,x,y)
+# removing objects from the environment that are no longer needed. To free space.
+rm(temp_data_upload, temp_data)
+# Extracting the seafloor temperature for each observation
+seafloor_temp_vector <- apply(temp_data_analysis,1,lastValue) %>% 
+  as_tibble()
+# Combining the coordinates and the seafloor temperature for each observation
+# Creating the final dataset of seafloor temperature
+seafloor_temp <- cbind(coordinates_temp, seafloor_temp_vector) %>% 
+  rename("temperature" = value)
+# Downloading the dataset in csv format 
+write.csv(seafloor_temp, "Predictor Variables/Temperature/seafloor_temp.csv", row.names = TRUE)
+# removing all temperature-related objects from the environment to free space
+rm(temp_data_analysis, coordinates_temp, temp_data, seafloor_temp_vector, seafloor_temp)
+```
+Creating the silicate seafloor dataset
+```{r}
+# Uploading the silicate data
+silicate_data_upload <- read_csv("Predictor Variables/Silicate/sampled_silicate.csv")
+
+# changing the id column and removing the column fid (unimportant variable)
+silicate_data <- silicate_data_upload %>% 
+  mutate(id = row_number()) %>% 
+  select(-c(fid))
+
+# Removing rows with only NAs in the silicate entries
+silicate_data <- silicate_data[rowSums(is.na(silicate_data)) != (ncol(silicate_data)-3),]
+
+silicate_data_analysis <- silicate_data %>% 
+  select(-c(x,y))
+# Extracting the coordinates for each observation
+coordinates_silicate <- silicate_data %>%
+  select(id,x,y)
+# removing objects from the environment that are no longer needed. To free space.
+rm(silicate_data_upload, silicate_data)
+
+# Extracting the seafloor silicate for each observation
+seafloor_silicate_vector <- apply(silicate_data_analysis,1,lastValue) %>% 
+  as_tibble()
+# Combining the coordinates and the seafloor temperature for each observation
+# Creating the final dataset of seafloor temperature
+seafloor_silicate <- cbind(coordinates_silicate, seafloor_silicate_vector) %>% 
+  rename("silicate" = value)
+# Downloading the dataset in csv format
+write.csv(seafloor_silicate, "Predictor Variables/Silicate/seafloor_silicate.csv", row.names = TRUE)
+
+# removing all silicate-related objects from the environment to free space
+rm(silicate_data_analysis, coordinates_silicate, seafloor_silicate_vector, seafloor_silicate)
+```
+Creating the salinity seafloor dataset
+```{r}
+# Uploading the salinity data
+salinity_data_upload <- read_csv("Predictor Variables/Salinity/sampled_salinity.csv")
+
+# changing the id column and removing the column fid (unimportant variable)
+salinity_data <- salinity_data_upload %>% 
+  mutate(id = row_number()) %>% 
+  select(-c(fid))
+
+# Removing rows with only NAs in the salinity entries
+salinity_data <- salinity_data[rowSums(is.na(salinity_data)) != (ncol(salinity_data)-3),]
+
+# Extracting the salinity entries for each observation
+salinity_data_analysis <- salinity_data %>% 
+  select(-c(x,y))
+
+# Extracting the coordinates for each observation
+coordinates_salinity <- salinity_data %>%
+  select(id,x,y)
+
+# removing objects from the environment that are no longer needed. To free space.
+rm(salinity_data_upload, salinity_data)
+
+# Extracting the seafloor temperature for each observation
+seafloor_salinity_vector <- apply(salinity_data_analysis,1,lastValue) %>% 
+  as_tibble()
+# Combining the coordinates and the seafloor temperature for each observation
+# Creating the final dataset of seafloor temperature
+seafloor_salinity <- cbind(coordinates_salinity, seafloor_salinity_vector) %>% 
+  rename("salinity" = value)
+# Downloading the dataset in csv format
+write.csv(seafloor_salinity, "Predictor Variables/Salinity/seafloor_salinity.csv", row.names = TRUE)
+
+# removing all salinity-related objects from the environment to free space
+rm(salinity_data_analysis, coordinates_salinity, seafloor_salinity_vector, seafloor_salinity)
+```
+Creating the phosphate seafloor dataset
+```{r}
+# Uploading the phosphate data
+phosphate_data_upload <- read_csv("Predictor Variables/Phosphate/sampled_phosphate.csv")
+
+# changing the id column and removing the column fid (unimportant variable)
+phosphate_data <- phosphate_data_upload %>% 
+  mutate(id = row_number()) %>% 
+  select(-c(fid))
+
+# Removing rows with only NAs in the phosphate entries
+phosphate_data <- phosphate_data[rowSums(is.na(phosphate_data)) != (ncol(phosphate_data)-3),]
+
+# Extracting the phosphate entries for each observation
+phosphate_data_analysis <- phosphate_data %>% 
+  select(-c(x,y))
+
+# Extracting the coordinates for each observation
+coordinates_phosphate <- phosphate_data %>%
+  select(id,x,y)
+
+# removing objects from the environment that are no longer needed. To free space.
+rm(phosphate_data_upload, phosphate_data)
+
+
+# Extracting the seafloor values for each observation
+seafloor_phosphate_vector <- apply(phosphate_data_analysis,1,lastValue) %>% 
+  as_tibble()
+# Combining the coordinates and the seafloor temperature for each observation
+# Creating the final dataset of seafloor temperature
+seafloor_phosphate <- cbind(coordinates_phosphate, seafloor_phosphate_vector) %>% 
+  rename("phosphate" = value)
+# Downloading the dataset in csv format
+write.csv(seafloor_phosphate, "Predictor Variables/Phosphate/seafloor_phosphate.csv", row.names = TRUE)
+
+# removing all phosphate-related objects from the environment to free space
+rm(phosphate_data_analysis, coordinates_phosphate, seafloor_phosphate_vector, seafloor_phosphate)
+```
+Creating the percent oxygen saturation seafloor dataset
+```{r}
+# Uploading the oxygen saturation data
+oxy_saturation_data_upload <- read_csv("Predictor Variables/Percent oxygen saturation/sampled_percent_oxygen_saturation.csv")
+
+# changing the id column and removing the column fid (unimportant variable)
+oxy_saturation_data <- oxy_saturation_data_upload %>% 
+  mutate(id = row_number()) %>% 
+  select(-c(fid))
+
+# Removing rows with only NAs in the phosphate entries
+oxy_saturation_data <- oxy_saturation_data[rowSums(is.na(oxy_saturation_data)) != (ncol(oxy_saturation_data)-3),]
+
+# Extracting the phosphate entries for each observation
+oxy_saturation_data_analysis <- oxy_saturation_data %>% 
+  select(-c(x,y))
+
+# Extracting the coordinates for each observation
+coordinates_oxy_saturation <- oxy_saturation_data %>%
+  select(id,x,y)
+
+# removing objects from the environment that are no longer needed. To free space.
+rm(oxy_saturation_data_upload, oxy_saturation_data)
+
+# Extracting the seafloor values for each observation
+seafloor_oxy_saturation_vector <- apply(oxy_saturation_data_analysis,1,lastValue) %>% 
+  as_tibble()
+# Combining the coordinates and the seafloor oxygen saturation for each observation
+# Creating the final dataset of seafloor oxygen saturation
+seafloor_oxy_saturation <- cbind(coordinates_oxy_saturation, seafloor_oxy_saturation_vector) %>% 
+  rename("percent_oxygen_saturation" = value)
+
+# Downloading the dataset in csv format
+write.csv(seafloor_oxy_saturation, "Predictor Variables/Percent oxygen saturation/seafloor_oxygen_saturation.csv", row.names = TRUE)
+
+# removing all phosphate-related objects from the environment to free space
+rm(oxy_saturation_data_analysis, coordinates_oxy_saturation, seafloor_oxy_saturation_vector, seafloor_oxy_saturation)
+```
+Creating the nitrate seafloor dataset
+```{r}
+# Uploading the  nitrate data
+nitrate_data_upload <- read_csv("Predictor Variables/Nitrate/sampled_nitrate.csv")
+
+nitrate_data <- nitrate_data_upload %>% 
+  mutate(id = row_number()) %>% 
+  select(-c(fid))
+
+# Removing rows with only NAs in the entries
+nitrate_data <- nitrate_data[rowSums(is.na(nitrate_data)) != (ncol(nitrate_data)-3),]
+
+# Extracting the nitrate entries for each observation
+nitrate_data_analysis <- nitrate_data %>% 
+  select(-c(x,y))
+
+# Extracting the coordinates for each observation
+coordinates_nitrate <- nitrate_data %>%
+  select(id,x,y)
+
+# removing objects from the environment that are no longer needed. To free space.
+rm(nitrate_data_upload, nitrate_data)
+
+# Extracting the seafloor nitrate values for each observation
+seafloor_nitrate_vector <- apply(nitrate_data_analysis,1,lastValue) %>% 
+  as_tibble()
+# Combining the coordinates and the seafloor temperature for each observation
+# Creating the final dataset of seafloor nitrate
+seafloor_nitrate <- cbind(coordinates_nitrate, seafloor_nitrate_vector) %>% 
+  rename("nitrate" = value)
+# Downloading the dataset in csv format
+write.csv(seafloor_nitrate, "Predictor Variables/Nitrate/seafloor_nitrate.csv", row.names = TRUE)
+
+# removing all phosphate-related objects from the environment to free space
+rm(nitrate_data_analysis, coordinates_nitrate, seafloor_nitrate_vector, seafloor_nitrate)
+```
+
+Creating the dissolved oxygen seafloor dataset
+```{r}
+# Uploading the dissolved oxygen data
+dissolved_oxygen_data_upload <- read_csv("Predictor Variables/Dissolved oxygen/sampled_dissolved_oxygen.csv")
+
+dissolved_oxygen_data <- dissolved_oxygen_data_upload %>% 
+  mutate(id = row_number()) %>% 
+  select(-c(fid))
+
+# Removing rows with only NAs in the entries
+dissolved_oxygen_data <- dissolved_oxygen_data[rowSums(is.na(dissolved_oxygen_data)) != (ncol(dissolved_oxygen_data)-3),]
+
+# Extracting the nitrate entries for each observation
+dissolved_oxygen_data_analysis <- dissolved_oxygen_data %>% 
+  select(-c(x,y))
+
+# Extracting the coordinates for each observation
+coordinates_dissolved_oxygen <- dissolved_oxygen_data %>%
+  select(id,x,y)
+
+# removing objects from the environment that are no longer needed. To free space.
+rm(dissolved_oxygen_data_upload, dissolved_oxygen_data)
+
+# Extracting the seafloor temperature for each observation
+seafloor_dissolved_oxygen_vector <- apply(dissolved_oxygen_data_analysis,1,lastValue) %>% 
+  as_tibble()
+
+# Combining the coordinates and the seafloor temperature for each observation
+# Creating the final dataset of seafloor temperature
+seafloor_dissolved_oxygen <- cbind(coordinates_dissolved_oxygen, seafloor_dissolved_oxygen_vector) %>% 
+  rename("dissolved_oxygen" = value)
+# Downloading the dataset in csv format
+write.csv(seafloor_dissolved_oxygen, "Predictor Variables/Dissolved oxygen/seafloor_dissolved_oxygen.csv", row.names = TRUE)
+
+# removing all dissolved oxygen related objects from the environment to free space
+rm(dissolved_oxygen_data_analysis, coordinates_dissolved_oxygen, seafloor_dissolved_oxygen_vector, seafloor_dissolved_oxygen)
+```
+
+
+Creating the apparent oxygen utilization seafloor dataset
+```{r}
+# Uploading the silicate data
+app_ox_data_upload <- read_csv("Predictor Variables/Apparent oxygen utilization/sampled_apparent_oxygen_utilization.csv")
+
+app_ox_data <- app_ox_data_upload %>% 
+  mutate(id = row_number()) %>% 
+  select(-c(fid))
+
+# Removing rows with only NAs in the entries
+app_ox_data <- app_ox_data[rowSums(is.na(app_ox_data)) != (ncol(app_ox_data)-3),]
+
+# Extracting the nitrate entries for each observation
+app_ox_data_analysis <- app_ox_data %>% 
+  select(-c(x,y))
+
+# Extracting the coordinates for each observation
+coordinates_app_ox <- app_ox_data %>%
+  select(id,x,y)
+
+# removing objects from the environment that are no longer needed. To free space.
+rm(app_ox_data_upload, app_ox_data)
+
+# Extracting the seafloor temperature for each observation
+seafloor_app_ox_vector <- apply(app_ox_data_analysis,1,lastValue) %>% 
+  as_tibble()
+
+# Combining the coordinates and the seafloor temperature for each observation
+# Creating the final dataset of seafloor temperature
+seafloor_app_ox <- cbind(coordinates_app_ox, seafloor_app_ox_vector) %>% 
+  rename("apparent_oxygen_utilization" = value)
+
+# Downloading the dataset in csv format
+write.csv(seafloor_app_ox, "Predictor Variables/Apparent oxygen utilization/seafloor_apparent_oxygen_utilization.csv", row.names = TRUE)
+
+# removing all apparent oxygen utilization - related objects from the environment to free space
+rm(app_ox_data_analysis, coordinates_app_ox, seafloor_app_ox_vector, seafloor_app_ox)
+```
+
+***Processing the chlorophyl-a data***
+The chlorophyll data contains columns with chlorophyl concentrations for every month between the years 2010 - 2019. Four columns give values with wrong order of magnitude, and were removed. The mean of all months were calculated. The mean values, and coordinates were extracted for the final dataset. 
+```{r}
+# Creating a for-loop to upload and process the chlorophyl data in a step-wise manner, due to storage limitations. 
+
+# creating the cut-off row numbers for each partial dataset. The total row number of the dataset is 
+
+chlorophyl_upload <- read_csv("Predictor Variables/Chlorophyll a/chlorophyll_a_all_months.csv") %>% select(-c(fid,id))
+
+# Removing chlorophyll values that have entries with wrong order of magnitude.
+chlorophyl_data_col_removed  <- chlorophyl_data %>% 
+  select(-c(colnames(chlorophyl_1[2]), colnames(chlorophyl_1[48]), colnames(chlorophyl_1[35]), colnames(chlorophyl_1[95])))
+
+# Creating a column with the mean values of each month.  
+chlorophyl_data_col_removed$chlorophyl <- rowMeans(chlorophyl_1[,1:117])
+
+# Final chlorophyl dataset 
+surface_chlorophyl_a <- chlorophyl_data_col_removed %>% 
+  select(x, y, chlorophyl) 
+
+# Downloading the chlorophyl data
+write.csv("Predictor Variables/Chlorophyll a/surface_chlorophyl_a.csv")
+
+```
+
+
+
+***Final Dataset For Modeling***
+Below, the coral and environmental data which was processed in R is uploaded. Furthermore, the seafloor terrain data, which was processed in QGIS, is uploaded. All these datasets share the same coordinates, and is merged to a single dataset ready for maxent modeling. In order to merge on identical coordinates, all coordinate values were rounded to 5 decimals to remove minor differences.
+```{r}
+# Coral dataset 
+FINAL_coral <- read_csv("Predictor Variables/Coral data/final_coral_gridded.csv") %>%   select(x, y, coral_presence, coral_reliability) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Environmental seafloor data
+# Temperature
+FINAL_temperature_seafloor <- read_csv("Predictor Variables/Temperature/seafloor_temp.csv") %>%
+  select(x, y, temperature) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Silicate
+FINAL_silicate_seafloor <- read_csv("Predictor Variables/Silicate/seafloor_silicate.csv") %>% 
+  select(x, y, silicate) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Salinity
+FINAL_salinity_seafloor <- read_csv("Predictor Variables/Salinity/seafloor_salinity.csv") %>% 
+  select(x, y, salinity) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Phosphate
+FINAL_phosphate_seafloor <- read_csv("Predictor Variables/Phosphate/seafloor_phosphate.csv") %>% 
+  select(x, y, phosphate) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Percent oxygen saturation 
+FINAL_oxy_saturation_seafloor <- read_csv("Predictor Variables/Percent oxygen saturation/seafloor_oxygen_saturation.csv") %>% 
+  select(x, y, percent_oxygen_saturation)  %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Nitrate
+FINAL_nitrate_seafloor <- read_csv("Predictor Variables/Nitrate/seafloor_nitrate.csv") %>%
+  select(x, y, nitrate) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Dissolved oxygen
+FINAL_dissolved_oxygen_seafloor <- read_csv("Predictor Variables/Dissolved oxygen/seafloor_dissolved_oxygen.csv") %>%
+  select(x, y, dissolved_oxygen) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Apparent oxygen utilization
+FINAL_app_ox_utilization_seafloor <- read_csv("Predictor Variables/Apparent oxygen utilization/seafloor_apparent_oxygen_utilization.csv") %>%
+  select(x, y, apparent_oxygen_utilization) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Chlorophyll a
+FINAL_chlorophyll_a <- read_csv("Predictor Variables/Chlorophyll a/surface_chlorophyll_a.csv") %>% 
+  select(x, y, chlorophyl) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+
+# Seafloor datasets
+
+# Bathymetry
+FINAL_bathymetry <- read_csv("Predictor Variables/Bathymetry data/sampled_bathymetry.csv") %>% 
+  select(x, y, SAMPLE_bathymetry1) %>% 
+  rename("depth" = SAMPLE_bathymetry1) %>% 
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Aspect 15 arc sec
+FINAL_aspect_15arcsec <- read_csv("Predictor Variables/Aspect/aspect_15_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_aspect_15_arc_sec1) %>%
+  rename("aspect_15arcsec" = SAMPLE_aspect_15_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Aspect 60 arc sec 
+FINAL_aspect_60arcsec <- read_csv("Predictor Variables/Aspect/aspect_60_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_aspect_60_arc_sec1) %>%
+  rename("aspect_60arcsec" = SAMPLE_aspect_60_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Aspect 200 arc sec
+FINAL_aspect_200arcsec <- read_csv("Predictor Variables/Aspect/aspect_200_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_aspect_200_arc_sec1) %>%
+  rename("aspect_200arcsec" = SAMPLE_aspect_200_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Slope 15 arc sec
+FINAL_slope_15arcsec <- read_csv("Predictor Variables/Slope/slope_15_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_slope_15_arc_sec1) %>%
+  rename("slope_15arcsec" = SAMPLE_slope_15_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Slope 200 arc sec
+FINAL_slope_200arcsec <- read_csv("Predictor Variables/Slope/slope_200_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_slope_200_arc_sec1) %>%
+  rename("slope_200arcsec" = SAMPLE_slope_200_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Slope-of-slope 15 arc sec
+FINAL_slope_of_slope_15arcsec <- read_csv("Predictor Variables/Slope of Slope/slope_of_slope_15_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_slope_of_slope_15_arc_sec1) %>%
+  rename("slope_of_slope_15arcsec" = SAMPLE_slope_of_slope_15_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Slope-of-slope 60 arc sec
+FINAL_slope_of_slope_60arcsec <- read_csv("Predictor Variables/Slope of Slope/slope_of_slope_60_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_slopeofslope_60_arc_sec1) %>%
+  rename("slope_of_slope_60arcsec" = SAMPLE_slopeofslope_60_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Slope-of-slope 200 arc sec
+FINAL_slope_of_slope_200arcsec <- read_csv("Predictor variables/Slope of Slope/slope_of_slope_200_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_slope_of_slope_200_arc_sec1) %>%
+  rename("slope_of_slope_200arcsec" = SAMPLE_slope_of_slope_200_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Rougness 15 arc sec
+FINAL_roughness_15arcsec <- read_csv("Predictor Variables/Roughness/roughness_15_arc_sec.csv") %>% 
+  select(x, y, SAMPLE_roughness_15_arc_sec1) %>%
+  rename("roughness_15arcsec" = SAMPLE_roughness_15_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+# Roughness 60 arc sec
+FINAL_roughness_60arcsec <- read_csv("Predictor Variables/Roughness/roughness_60_arc_sec.csv") %>%
+  select(x, y, SAMPLE_roughness_60_arc_sec1) %>%
+  rename("roughness_60arcsec" = SAMPLE_roughness_60_arc_sec1) %>%
+  mutate(x = round(x, digits = 5), y = round(y, digits = 5))
+
+
+
+# Final dataset
+Final_dataset <- FINAL_coral %>% 
+  # Joining the environmental data
+  inner_join(FINAL_silicate_seafloor) %>% 
+  inner_join(FINAL_salinity_seafloor) %>% 
+  inner_join(FINAL_phosphate_seafloor) %>% 
+  inner_join(FINAL_oxy_saturation_seafloor) %>% 
+  inner_join(FINAL_nitrate_seafloor) %>% 
+  inner_join(FINAL_dissolved_oxygen_seafloor) %>% 
+  inner_join(FINAL_app_ox_utilization_seafloor) %>% 
+  inner_join(FINAL_chlorophyll_a) %>% 
+  inner_join(FINAL_temperature_seafloor) %>%
+  # Joining the seafloor data
+  inner_join(FINAL_bathymetry) %>%
+  inner_join(FINAL_aspect_15arcsec) %>% 
+  inner_join(FINAL_aspect_60arcsec) %>% 
+  inner_join(FINAL_aspect_200arcsec) %>% 
+  inner_join(FINAL_slope_15arcsec) %>% 
+  inner_join(FINAL_slope_200arcsec) %>% 
+  inner_join(FINAL_slope_of_slope_15arcsec) %>% 
+  inner_join(FINAL_slope_of_slope_60arcsec) %>% 
+  inner_join(FINAL_slope_of_slope_200arcsec) %>% 
+  inner_join(FINAL_roughness_15arcsec) %>% 
+  inner_join(FINAL_roughness_60arcsec) %>% 
+  drop_na(-c(coral_reliability))
+
+
+# Downloading the final dataset
+write.csv(Final_dataset, "Modeling data/Final_dataset.csv")
+
+```
+***Creating the datasets used for modeling***
+Loading the data used for modeling. 
+```{r}
+# model dataset before variable removal
+final_dataset <- read_csv("Modeling data/Final_dataset.csv")
+final_dataset <- final_dataset %>%  select(-c(colnames(final_dataset[,1])))
+```
+***Variable selection based on collinearity***
+Creating a heatmap to find correlations between predictor variables. If two variables have a correlation coefficient higher than 0.7, one of the variables are omitted. 
+```{r}
+# Creating dataset only containing predictors, and making a correlation matrix dataset. 
+pred_cor <- final_dataset %>%
+  select(-c(x, y, coral_presence, coral_reliability)) %>% 
+  cor() %>% 
+  melt() %>% 
+  mutate(significant_correlation_coeff = NA)
+
+# Only giving correlation coefficients for variables that correlate above 0.7
+for (i in 1:nrow(pred_cor)) {
+  if (pred_cor$value[i] > 0.7 | pred_cor$value[i] < -0.7) {
+    pred_cor$significant_correlation_coeff[i] = pred_cor$value[i]
+  }
+  else {
+    pred_cor$significant_correlation_coeff[i] = NA
+  }
+}
+
+# Creating variable heatmap 
+ggplot(data = pred_cor, aes(x = Var1, y = Var2, fill = value, label = round(significant_correlation_coeff, 2))) + geom_tile() + 
+labs(x = NULL, y = NULL, fill = "Pearson's\nCorrelation") +
+scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", limits=c(-1,1)) +
+geom_text(size = 3) +
+theme_classic() +
+scale_x_discrete(expand=c(0,0)) + 
+scale_y_discrete(expand=c(0,0)) +
+theme(text=element_text(family="Roboto"), axis.text.x = element_text(angle = 60, hjust = 1)) 
+  
+# Filtering correlation matrix to only contain correlation coefficients with an absolute value above 0,7. The duplicated entries for correlation coefficients are also removed
+high_cor <- pred_cor %>% 
+  mutate(value = abs(value)) %>%
+  filter(value >= 0.7,  value < 1) %>% 
+  arrange(desc(value)) %>% 
+  filter(row_number() %% 2 == 1)
+# Removing temporary objects only needed for this section of code
+rm(high_cor)
+```
+- Temperature had high correlations with silicate, percent oxygen saturation and salinity. Therefore, silicate, percent oxygen saturation and salinity were removed. 
+
+- Dissolved oxygen had high correlations with nitrate, phosphate and apparent oxygen utilization. Therefore, nitrate, phosphate and apparent oxygen utilizations were removed. 
+
+- slope on a 15 arc-second scale correlated highly with roughness on a 15 arc-second scale, roughness on a 60 arc-second scale, slope-of-slope on a 15 arc-second scale and slope on a 200 arc-second scale. Roughness on a 15 arc-second scale, roughness on a 60 arc-second scale, slope-of-slope on a 15 arc-second scale and slope on a 200 arc-second scale were therefore removed. 
+
+Removing the correlating predictors below. 
+```{r}
+# Removing correlating predictors
+m_final <- final_dataset %>% 
+  select(-c(silicate, percent_oxygen_saturation, salinity)) %>% 
+  select(-c(nitrate, phosphate, apparent_oxygen_utilization)) %>%
+  select(-c(roughness_15arcsec, roughness_60arcsec, slope_of_slope_15arcsec, slope_200arcsec)) 
+
+# Checking that no predictors correlate above 0.7 after the filtering
+high_cor <- m_final %>% 
+  select(-c(x, y, coral_presence, coral_reliability)) %>% 
+  cor() %>% 
+  melt() %>% 
+  mutate(value = abs(value)) %>% 
+  filter(value >= 0.7,  value < 1) %>% 
+  arrange(desc(value)) %>% 
+  filter(row_number() %% 2 == 1)
+# The object has 0 observations, meaning no predictors correlate above a correlation coefficient of 0.7
+
+# Removing temporary objects only needed for this section of code
+rm(high_cor)
+# Downloading the modeling dataset 
+write.csv(m_final, "Modeling data/m_final.csv")
+```
+
+***First Round of Modeling***
+This sections concerns the first round of modeling (train + test on reliable corals only). Creating a training and testing dataset. 
+```{r}
+# uploading m_final dataset
+m_final <- read.csv("Modeling data/m_final.csv") %>% 
+  select(-c(X))
+  
+# Reliable presence data
+presence_data <- m_final %>% 
+  filter(coral_reliability == "reliable")
+
+# Background data. 500018 background points are needed for this round of training
+set.seed(17)
+background_data <- m_final %>% 
+  filter(coral_presence == 0) %>% 
+  sample_frac(0.0218001)
+
+# divider for splitting presence data into a train and test set
+dt_p = sort(sample(nrow(presence_data), nrow(presence_data)*0.8))
+# presence data for training 
+presence_train <- presence_data[dt_p,] 
+# presence data for testing 
+presence_test <- presence_data[-dt_p,]
+# divider for splitting background data into a train and test set
+dt_bg = sort(sample(nrow(background_data), nrow(background_data)*0.8))
+# background data for training
+background_train <- background_data[dt_bg,]
+# background data for testing 
+background_test <- background_data[-dt_bg,]
+# train dataset for only train+test on reliable datapoints
+train_data1 <- rbind(presence_train, background_train)
+# test dataset for only train+test on reliable datapoints
+test_data1 <- rbind(presence_test, background_test)
+```
+
+Model training. Working with only reliable datapoints so far. Training a dataset with the presence points and randomly sampled background points
+```{r}
+# presence and absence values 
+presence_absence <- train_data1 %>% 
+  select(coral_presence)
+# predictors 
+predictors <- train_data1 %>% 
+  select(-c(x, y, coral_presence, coral_reliability))
+# maxent model fit
+me1 <- maxent(x = predictors, p = presence_absence)
+```
+Graphing the ROC curve for the model fit on the training set
+```{r}
+# predictor variables for presence observations in the train set
+p_predictors_train <- train_data1 %>% 
+  filter(coral_presence == 1) %>% 
+  select(-c(x, y, coral_presence, coral_reliability))
+# predictor variables for background observations in the train set
+bg_predictors_train <- train_data1 %>% 
+  filter(coral_presence == 0) %>% 
+  select(-c(x, y, coral_presence, coral_reliability))
+# evaluating the model fit on the training set
+e1_m1 <- evaluate(me1, p = p_predictors_train, a = bg_predictors_train)
+# Plotting the ROC curve
+plot(e1_m1, "ROC")
+```
+Finding the 10th percentile threshold value
+```{r}
+# Finding 10th percentile threshold
+# Predicted training data probabilites
+pred_train_prob <- predict(me1, train_data1) %>% 
+  as_tibble() %>% 
+  rename("predicted_probability" = value)
+# Original training set merged with probabilities, and filtered to only contain presence observations
+pred_presence_train_set <- cbind(train_data1, pred_train_prob) %>% 
+  filter(coral_presence == 1)
+# Finding the threshold 
+threshold_value <- unname(quantile(pred_presence_train_set$predicted_probability, 0.1))
+```
+Testing on the reliable presence test set, and graphing the corresponding ROC curve
+```{r}
+# presence observation predictors
+p_predictors_test <- test_data1 %>% 
+  filter(coral_presence == 1) %>% 
+  select(-c(x,y, coral_presence, coral_reliability))
+# absence observation predictors 
+bg_predictors_test <- test_data1 %>% 
+  filter(coral_presence == 0) %>%
+  select(-c(x,y, coral_presence, coral_reliability))
+# evaluating test
+e2_m1 <- evaluate(me1, p = p_predictors_test, a = bg_predictors_test)
+# plotting the ROC curve of the model fit on the test set
+plot(e2_m1, "ROC")
+```
+Using the 10th percentile threshold for prediction. Applying the threshold value to make make a threshold-dependent evaluation of model performance. Making the predicion on the test dataset
+```{r}
+# Prediction probabilites
+p_prob <- predict(me1, test_data1) %>% 
+  as_tibble() %>% 
+  rename("predicted_probability" = value)
+  
+# original test dataset merged with predictions
+p_test_set <- cbind(test_data1, p_prob) %>% 
+  mutate(predicted_coral_presence = 0)
+
+# Applying the threshold with a for-loop
+for(i in 1:nrow(p_test_set)) {
+    if(p_test_set$predicted_probability[i] > threshold_value) {
+        p_test_set$predicted_coral_presence[i] = 1
+    }
+    else {
+      p_test_set$predicted_coral_presence[i] = 0
+    }
+}
+# Finding the omission rate
+false_negatives <- p_test_set %>%
+  filter(coral_presence == 1) %>% 
+  filter(predicted_coral_presence == 0) %>% 
+  nrow()
+
+true_positives <- p_test_set %>% 
+  filter(coral_presence == 1) %>%
+  nrow()
+
+om_rate <- false_negatives/true_positives
+  om_rate
+```
+Using 50 000 background points gave an omission rate close to 10%
+
+***Training the model all data points, and testing on the unreliable data*** 
+```{r}
+# uploading the modeling dataset
+m_final <- read.csv("Modeling data/m_final.csv") %>% 
+  select(-c(X))
+# reliable presence observations for the training set
+reliable_presence <- m_final %>% 
+  filter(coral_reliability == "reliable")
+# unreliable presence observations for the testing set
+unreliable_presence <- m_final %>% 
+  filter(coral_reliability == "unreliable")
+# background data for training. Exctracting around 50000 points
+set.seed(17)
+background_train <- m_final %>%
+  filter(coral_presence == 0) %>% 
+  sample_frac(0.0218001)
+# background data for testing. Extracting around 23659 points
+background_test <- m_final %>% 
+  filter(coral_presence == 0) %>% 
+  sample_frac(0.0103118)
+# training set
+train_data2 <- rbind(reliable_presence, background_train)
+# testing set
+test_data2 <- rbind(unreliable_presence, background_test)
+```
+
+Code for modeling with reliable/unreliable data
+```{r}
+# presence-absence for training
+presence_absence <- train_data2 %>% 
+  select(coral_presence) 
+# predictors for training
+predictors <- train_data2 %>%
+  select(-c(x, y, coral_presence, coral_reliability))
+# model fit
+me2 <- maxent(p = presence_absence, x = predictors)
+# removing objects that will not be needed for the coming sections
+rm(reliable_presence, unreliable_presence, background_train, background_test, presence_absence, predictors)
+```
+
+
+Finding the 10th percentile threshold value
+```{r}
+# Finding 10th percentile threshold
+# Predicted training data probabilites
+pred_train_prob <- predict(me2, train_data2) %>% 
+  as_tibble() %>% 
+  rename("predicted_probability" = value)
+# Original training set merged with probabilities, and filtered to only contain presence observations
+pred_presence_train_set <- cbind(train_data2, pred_train_prob) %>% 
+  filter(coral_presence == 1)
+# Finding the threshold 
+threshold_value <- unname(quantile(pred_presence_train_set$predicted_probability, 0.1))
+```
+
+Graphing the ROC curve for the model fit on the training set
+```{r}
+# predictor variables for presence observations in the train set
+p_predictors_train <- train_data2 %>% 
+  filter(coral_presence == 1) %>% 
+  select(-c(x, y, coral_presence, coral_reliability))
+# predictor variables for background observations in the train set
+bg_predictors_train <- train_data2 %>% 
+  filter(coral_presence == 0) %>% 
+  select(-c(x, y, coral_presence, coral_reliability))
+# evaluating the model fit on the training set
+e1_m2 <- evaluate(me2, p = p_predictors_train, a = bg_predictors_train)
+# Plotting the ROC curve
+plot(e1_m2, "ROC")
+```
+
+Testing on the unreliable presence test set, and graphing the corresponding ROC curve
+```{r}
+# absence points test
+a_test <- test_data2 %>% 
+  filter(coral_presence == 0) %>% 
+  select(-c(x,y, coral_presence, coral_reliability))
+# presence points test
+p_test <- test_data2 %>%
+  filter(coral_presence == 1) %>% 
+  select(-c(x,y, coral_presence, coral_reliability))
+# evaluate 
+e2_m2 <- evaluate(me2, p = p_test, a = a_test)
+# Plotting the ROC of the model fit on the test set
+plot(e2_m2, "ROC")
+
+```
+
+Using the 10th percentile threshold for prediction. Applying the threshold value to make make a threshold-dependent evaluation of model performance. Making the predicion on the test dataset.
+```{r}
+# Prediction probabilites
+p_prob <- predict(me2, test_data2) %>% 
+  as_tibble() %>% 
+  rename("predicted_probability" = value)
+# original test dataset merged with predictions
+p_test_set <- cbind(test_data2, p_prob) %>% 
+  mutate(predicted_coral_presence = 0)
+# Applying the threshold with a for-loop
+for(i in 1:nrow(p_test_set)) {
+    if(p_test_set$predicted_probability[i] > threshold_value) {
+        p_test_set$predicted_coral_presence[i] = 1
+    }
+    else {
+      p_test_set$predicted_coral_presence[i] = 0
+    }
+}
+# Finding the omission rate
+false_negatives <- p_test_set %>%
+  filter(coral_presence == 1) %>% 
+  filter(predicted_coral_presence == 0) %>% 
+  nrow()
+
+true_positives <- p_test_set %>% 
+  filter(coral_presence == 1) %>%
+  nrow()
+
+om_rate <- false_negatives/true_positives
+om_rate
+```
+
+Making predictions over the whole study region using the model trained on all reliable presence occurences
+```{r}
+# Loading all observations 
+m_final <- read_csv("Modeling data/m_final.csv")
+# Prediction probabilities for all observations
+p_prob_world <- predict(me2, m_final) %>% 
+  as_tibble() %>% 
+  rename("predicted_probability" = value)
+# Original dataset with observation for the whole region merged with probabilites
+p_prob_world_set <- cbind(m_final, p_prob_world)
+# Dataset containing coordinates and the predicted probabilities
+p_prob_world_coord <- p_prob_world_set %>% 
+  select(x, y, predicted_probability)
+# Downloading the predicted occurence dataset
+write.csv(p_prob_world_coord, "Modeling data/predicted_occurences.csv")
+```
+
+Converting the predictions and coordinates over the whole study region to a raster file. The raster file will be uploaded to QGIS for creating a map
+
+```{r}
+# Uploading the predicted occurrence dataset
+pred_occ_region <- read_csv("Modeling data/predicted_occurences.csv")
+# Coordinates of the predicted occurences
+coordinates <- pred_occ_region %>% 
+  select(x, y)
+# Prediction values 
+prediction_values <- pred_occ_region %>% 
+  select(predicted_probability)
+
+# Uploading the bathymetry raster. The raster file is needed to make the resolution and extent of the empty raster
+bathymetry <- raster("Predictor Variables/Bathymetry data/bathy - clipped.tif")
+# creating an empty raster
+r <- raster(ext=extent(bathymetry), resolution=res(bathymetry), crs = "+proj=longlat +datum=WGS84")
+# Creating a raster of the reliable presence_absence coral data
+pred_occ_region_raster <- rasterize(x = coordinates, y = r, field = prediction_values)
+# Downloading the coral raster dataset
+writeRaster(pred_occ_region_raster, file = "Modeling data/predicted_occurences_region.tif")
+
+```
+Creating predictions on the lower half of the study area, and upper half of the study area independently. 
+```{r}
+# uploading the reliable presence observations
+m_final <- read.csv("Modeling data/m_final.csv") %>% 
+  select(-c(X))
+# Finding the reliable presence observations
+rel_presence <- m_final %>% 
+  filter(coral_reliability == "reliable")
+# Downloading reliable presence observations
+write.csv(rel_presence, "Modeling data/reliable_presence_observations.csv")
+# Finding the unreliable presence observations
+unrel_presence <- m_final %>% 
+  filter(coral_reliability == "unreliable")
+# Downloading the unreliable presence observations
+write.csv(unrel_presence, "Modeling data/unreliable_presence_observations.csv")
+# Finding the background data 
+background <- m_final %>% 
+  filter(coral_presence == 0)
+# Downloading the background data
+write.csv(background, "Modeling data/background.csv")
+
+```
+The reliable and unreliable presence data, and background data, was clipped using QGIS. The datasets were uploaded to R again below, and used for modeling. Below is the modeling of the lower half of the study area.
+***Lower Half***
+```{r}
+# lower half background points
+lower_half_background <- read_csv("Modeling data/Lower half background.csv") %>% 
+select(-c(field_1)) 
+
+reliable_presence <- read_csv("Modeling data/Lower_half_reliable_presence.csv") %>% 
+select(-c(field_1))
+  
+# unreliable presence observations for the testing set
+unreliable_presence <- read_csv("Modeling data/Lower_half_unreliable_presence.csv") %>% 
+select(-c(field_1))
+  
+# for reliable presence observations, 37,000 background observations are needed
+background_train <- lower_half_background %>%
+  sample_frac(0.035289)
+
+# for unreliable presence observations, 12,704 background_observations are needed.
+background_test <- lower_half_background %>% 
+  sample_frac(0.012117)
+
+# training set 
+train_data2 <- rbind(background_train, reliable_presence)
+# test set
+test_data2 <- rbind(background_test, unreliable_presence)
+```
+
+***Upper Half***
+```{r}
+upper_half_background <- read_csv("Modeling data/Upper_half_background.csv") %>% 
+select(-c(field_1)) 
+
+reliable_presence <- read_csv("Modeling data/Upper_half_reliable_presence.csv") %>% 
+select(-c(field_1))
+  
+# unreliable presence observations for the testing set
+unreliable_presence <- read_csv("Modeling data/Upper_half_unreliable_presence.csv") %>% 
+select(-c(field_1))
+  
+# for reliable presence observations, 13,022 background observations are needed
+background_train <- upper_half_background %>%
+  sample_frac(0.009994)
+
+# for unreliable presence observations, 11,434 background_observations are needed.
+background_test <- lower_half_background %>% 
+  sample_frac(0.010905)
+
+# training set 
+train_data2 <- rbind(background_train, reliable_presence)
+# test set
+test_data2 <- rbind(background_test, unreliable_presence)
+```
+
+***References*** 
+
+[1] Coralreef.noaa.gov. 2022. NOAA's Coral Reef Conservation Program (CRCP) - Coral Facts. [online] Available at: <https://coralreef.noaa.gov/education/coralfacts.html#:~:text=Soft%20coral%2C%20also%20known%20as,present%20in%20a%20reef%20ecosystems.> [Accessed 9 February 2022].
+
+[2] Poseidon's Web. 2022. Stony, Soft or Gorgonian, They're All Coral Polyps. [online] Available at: <https://poseidonsweb.com/all-corals-are-polyps/> [Accessed 9 February 2022].
+
+[3] Parsons, J., 2022. Gorgonian Corals - one of our living marine treasures - Dolphin Research Institute. [online] Dolphin Research Institute. Available at: <https://www.dolphinresearch.org.au/gorgonian-corals-one-of-our-living-marine-treasures/#:~:text=Think%20about%20that.,almost%20like%20under%2Dwater%20plants.&text=Their%20flexible%20skeleton%20allows%20the,to%20maximize%20their%20filter%2Dfeeding.> [Accessed 9 February 2022].
+
+[4] Pica, D., 2022. Lace corals at Lizard Island - Lizard Island Reef Research Foundation. [online] Lizard Island Reef Research Foundation. Available at: <https://lirrf.org/lace-corals-at-lizard-island/#:~:text=Globally%2C%20330%20stylasterid%20(lace%20coral)%20species%20have%20been%20described.&text=Although%20they%20provide%20a%20valuable,stylasterids%20found%20in%20Australian%20waters.> [Accessed 9 February 2022].
+
+[5] Pica, D. and Keable, S., 2022. Lace corals around Lizard Island. [online] The Australian Museum. Available at: <https://australian.museum/blog/amri-news/lace-corals-around-lizard-island/#:~:text=Stylaster%20coral%20%2D%20family%20Stylasteridae%2C%20Crypthelia%20sp.&text=Coral%20reefs%20comprise%20one%20of,refuges%20for%20thousands%20of%20species.> [Accessed 9 February 2022].
